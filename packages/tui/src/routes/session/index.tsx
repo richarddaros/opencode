@@ -141,6 +141,7 @@ const sessionBindingCommands = [
   "session.parent",
   "session.child.next",
   "session.child.previous",
+  "sessions.back",
 ] as const
 
 const sessionGlobalBindingCommands = [
@@ -293,9 +294,18 @@ export function Session() {
 
       if (result.data.workspaceID !== previousWorkspace) {
         project.workspace.set(result.data.workspaceID)
+      }
 
-        // Sync all the data for this workspace. Note that this
-        // workspace may not exist anymore which is why this is not
+      // Sessions opened from another project (e.g. via the sessions list) move
+      // the whole TUI context to the directory the session was started in.
+      const directoryChanged = result.data.directory !== sdk.directory
+      if (directoryChanged) {
+        sdk.setDirectory(result.data.directory)
+      }
+
+      if (directoryChanged || result.data.workspaceID !== previousWorkspace) {
+        // Sync all the data for this directory/workspace. Note that this
+        // location may not exist anymore which is why this is not
         // fatal. If it doesn't we still want to show the session
         // (which will be non-interactive)
         try {
@@ -1078,6 +1088,22 @@ export function Session() {
         moveChild(-1)
       }),
     },
+    {
+      title: "Back to sessions list",
+      value: "sessions.back",
+      category: "Session",
+      hidden: true,
+      enabled: () => {
+        if (session()?.parentID) return false
+        if (dialog.stack.length > 0) return false
+        // Only with an empty prompt, focused or not: leaving mid-draft would
+        // surprise anyone who scrolled up with text typed.
+        return (promptRef.current?.current.input ?? "") === ""
+      },
+      run: () => {
+        navigate({ type: "sessions" })
+      },
+    },
   ])
 
   const sessionCommands = createMemo(() =>
@@ -1826,6 +1852,27 @@ function GenericTool(props: ToolProps) {
   )
 }
 
+// Discreet marker for tool calls the LLM validator ("auto" mode) decided
+// without a human dialog, correlated through the audited callID. Only
+// allow/deny appear — uncertain/fallback already surfaced as the dialog.
+function AutoDecisionSuffix(props: { part?: ToolPart }) {
+  const { theme } = useTheme()
+  const ctx = use()
+  const sync = useSync()
+  const decision = createMemo(() => {
+    const part = props.part
+    if (!part) return undefined
+    return sync.data.decision[ctx.sessionID]?.find(
+      (item) => (item.verdict === "allow" || item.verdict === "deny") && item.metadata?.callID === part.callID,
+    )
+  })
+  return (
+    <Show when={decision()}>
+      {(item) => <span style={{ fg: theme.textMuted }}>{` · auto: ${item().verdict}`}</span>}
+    </Show>
+  )
+}
+
 function InlineTool(props: {
   icon: string
   iconColor?: RGBA
@@ -1900,6 +1947,7 @@ function InlineTool(props: {
       }}
     >
       {props.children}
+      <AutoDecisionSuffix part={props.part} />
     </InlineToolRow>
   )
 }
@@ -2021,10 +2069,14 @@ function BlockTool(props: {
             fallback={
               <text paddingLeft={3} fg={theme.textMuted}>
                 {title()}
+                <AutoDecisionSuffix part={props.part} />
               </text>
             }
           >
-            <Spinner color={theme.textMuted}>{title().replace(/^# /, "")}</Spinner>
+            <Spinner color={theme.textMuted}>
+              {title().replace(/^# /, "")}
+              <AutoDecisionSuffix part={props.part} />
+            </Spinner>
           </Show>
         )}
       </Show>
@@ -2074,7 +2126,15 @@ function Shell(props: ToolProps) {
           onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
         >
           <box gap={1}>
-            <Show when={isRunning()} fallback={<text fg={theme.text}>$ {stringValue(props.input.command)}</text>}>
+            <Show
+              when={isRunning()}
+              fallback={
+                <text fg={theme.text}>
+                  $ {stringValue(props.input.command)}
+                  {!title() && <AutoDecisionSuffix part={props.part} />}
+                </text>
+              }
+            >
               <Spinner color={theme.text}>{stringValue(props.input.command)}</Spinner>
             </Show>
             <Show when={output()}>

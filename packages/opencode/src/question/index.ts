@@ -2,6 +2,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Deferred, Effect, Layer, Schema, Context } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import { SessionID } from "@/session/schema"
+import { SessionStatus } from "@/session/status"
 import { QuestionID } from "./schema"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { QuestionV1 } from "@opencode-ai/schema/question-v1"
@@ -65,6 +66,7 @@ const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const events = yield* EventV2Bridge.Service
+    const sessionStatus = yield* SessionStatus.Service
     const state = yield* InstanceState.make<State>(
       Effect.fn("Question.state")(function* () {
         const state = {
@@ -73,10 +75,17 @@ const layer = Layer.effect(
 
         yield* Effect.addFinalizer(() =>
           Effect.gen(function* () {
+            // Persist the runtime status for every affected session so the
+            // cross-project list does not keep showing "needs input" for
+            // requests this instance just dropped.
+            const sessionIDs = new Set([...state.pending.values()].map((item) => item.info.sessionID))
             for (const item of state.pending.values()) {
               yield* Deferred.fail(item.deferred, new RejectedError())
             }
             state.pending.clear()
+            yield* Effect.forEach(sessionIDs, (sessionID) => sessionStatus.syncPersisted(sessionID), {
+              discard: true,
+            })
           }),
         )
 
@@ -102,6 +111,10 @@ const layer = Layer.effect(
       }
       pending.set(id, { info, deferred })
       yield* events.publish(Event.Asked, info)
+      yield* sessionStatus.setNeedsInput(
+        input.sessionID,
+        input.questions.map((question) => question.header).join(" • "),
+      )
 
       return yield* Effect.ensuring(
         Deferred.await(deferred),
@@ -128,6 +141,11 @@ const layer = Layer.effect(
         requestID: existing.info.id,
         answers: input.answers.map((a) => [...a]),
       })
+      // Restore the persisted status only once no questions remain pending
+      // for the session.
+      if (![...pending.values()].some((item) => item.info.sessionID === existing.info.sessionID)) {
+        yield* sessionStatus.syncPersisted(existing.info.sessionID)
+      }
       yield* Deferred.succeed(existing.deferred, input.answers)
     })
 
@@ -144,6 +162,9 @@ const layer = Layer.effect(
         sessionID: existing.info.sessionID,
         requestID: existing.info.id,
       })
+      if (![...pending.values()].some((item) => item.info.sessionID === existing.info.sessionID)) {
+        yield* sessionStatus.syncPersisted(existing.info.sessionID)
+      }
       yield* Deferred.fail(existing.deferred, new RejectedError())
     })
 
@@ -156,6 +177,6 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [EventV2Bridge.node] })
+export const node = LayerNode.make({ service: Service, layer: layer, deps: [EventV2Bridge.node, SessionStatus.node] })
 
 export * as Question from "."

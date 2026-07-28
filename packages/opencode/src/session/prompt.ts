@@ -55,6 +55,7 @@ import { eq } from "drizzle-orm"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
+import { SessionAutoSummary } from "./auto-summary"
 import { LLMEvent } from "@opencode-ai/llm"
 
 // @ts-ignore
@@ -137,6 +138,7 @@ const layer = Layer.effect(
     const summary = yield* SessionSummary.Service
     const sys = yield* SystemPrompt.Service
     const llm = yield* LLM.Service
+    const autoSummary = yield* SessionAutoSummary.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
     const database = yield* Database.Service
@@ -190,49 +192,32 @@ const layer = Layer.effect(
       return parts
     })
 
-    const title = Effect.fn("SessionPrompt.ensureTitle")(function* (input: {
-      session: Session.Info
-      history: SessionV1.WithParts[]
+    const generateTitle = Effect.fn("SessionPrompt.generateTitle")(function* (input: {
+      sessionID: SessionID
       providerID: ProviderV2.ID
       modelID: ModelV2.ID
+      user: SessionV1.User
+      context: SessionV1.WithParts[]
+      instruction: string
     }) {
-      if (input.session.parentID) return
-      if (!Session.isDefaultTitle(input.session.title)) return
-
-      const real = (m: SessionV1.WithParts) =>
-        m.info.role === "user" && !m.parts.every((p) => "synthetic" in p && p.synthetic)
-      const idx = input.history.findIndex(real)
-      if (idx === -1) return
-      if (input.history.filter(real).length !== 1) return
-
-      const context = input.history.slice(0, idx + 1)
-      const firstUser = context[idx]
-      if (!firstUser || firstUser.info.role !== "user") return
-      const firstInfo = firstUser.info
-
-      const subtasks = firstUser.parts.filter((p): p is SessionV1.SubtaskPart => p.type === "subtask")
-      const onlySubtasks = subtasks.length > 0 && firstUser.parts.every((p) => p.type === "subtask")
-
       const ag = yield* agents.get("title")
-      if (!ag) return
+      if (!ag) return undefined
       const mdl = ag.model
         ? yield* provider.getModel(ag.model.providerID, ag.model.modelID)
         : ((yield* provider.getSmallModel(input.providerID)) ??
           (yield* provider.getModel(input.providerID, input.modelID)))
-      const msgs = onlySubtasks
-        ? [{ role: "user" as const, content: subtasks.map((p) => p.prompt).join("\n") }]
-        : yield* MessageV2.toModelMessagesEffect(context, mdl)
+      const msgs = yield* MessageV2.toModelMessagesEffect(input.context, mdl)
       const text = yield* llm
         .stream({
           agent: ag,
-          user: firstInfo,
+          user: input.user,
           system: [],
           small: true,
           tools: {},
           model: mdl,
-          sessionID: input.session.id,
+          sessionID: input.sessionID,
           retries: 2,
-          messages: [{ role: "user", content: "Generate a title for this conversation:\n" }, ...msgs],
+          messages: [{ role: "user", content: input.instruction }, ...msgs],
         })
         .pipe(
           Stream.filter(LLMEvent.is.textDelta),
@@ -242,15 +227,117 @@ const layer = Layer.effect(
         )
       const cleaned = text
         .replace(/<think>[\s\S]*?<\/think>\s*/g, "")
+        // Some models emit a lone closing tag when the opening one was trimmed
+        // by the provider (observed with local qwen3 builds); drop the orphan.
+        .replace(/^\s*<\/think>\s*/g, "")
         .split("\n")
         .map((line) => line.trim())
         .find((line) => line.length > 0)
-      if (!cleaned) return
-      const t = cleaned.length > 100 ? cleaned.substring(0, 97) + "..." : cleaned
+      if (!cleaned) {
+        yield* Effect.logDebug("title generation returned empty text", { "session.id": input.sessionID })
+        return undefined
+      }
+      return {
+        text: cleaned.length > 100 ? cleaned.substring(0, 97) + "..." : cleaned,
+        model: `${mdl.providerID}/${mdl.id}`,
+      }
+    })
+
+    // Single title write: fires when a turn completes with the title still at
+    // its default. A user-renamed title is never overwritten, and an aborted
+    // first turn stays default until the next completed turn (the history then
+    // has more than one real user message, so the guard must not require one).
+    const retitle = Effect.fn("SessionPrompt.retitle")(function* (input: {
+      session: Session.Info
+      history: SessionV1.WithParts[]
+      providerID: ProviderV2.ID
+      modelID: ModelV2.ID
+      user: SessionV1.User
+    }) {
+      if (input.session.parentID) return
+      const fresh = yield* sessions.get(input.session.id).pipe(Effect.option)
+      const current = Option.getOrUndefined(fresh)
+      if (!current) return
+      if (!Session.isDefaultTitle(current.title)) return
+      const real = (m: SessionV1.WithParts) =>
+        m.info.role === "user" && !m.parts.every((p) => "synthetic" in p && p.synthetic)
+      const trigger = input.history.findLast(real)
+      if (!trigger) return
+
+      const t = yield* generateTitle({
+        sessionID: current.id,
+        providerID: input.providerID,
+        modelID: input.modelID,
+        user: input.user,
+        context: input.history,
+        instruction:
+          "Generate a title for this conversation. Consider the whole conversation so far, including what the assistant actually did:\n",
+      })
+      if (!t) return
       yield* sessions
-        .setTitle({ sessionID: input.session.id, title: t })
+        .setTitle({
+          sessionID: current.id,
+          title: t.text,
+          source: "llm",
+          model: t.model,
+          triggerMessageId: trigger.info.id,
+          // The rename race guard: only write if the title is still the
+          // default this retitle verified before the (slow) generation.
+          expectedTitle: current.title,
+        })
         .pipe(Effect.catchCause((cause) => Effect.logError("failed to generate title", { error: Cause.squash(cause) })))
     })
+
+    // LLM turn classifier: label the completed turn as waiting (the assistant
+    // asked the user something) or done, feeding the sessions list status.
+    // Runs inline before the loop exits so the verdict is registered before
+    // the runner reports idle; any failure just keeps the "?" heuristic.
+    const classifyTurn = (input: {
+      sessionID: SessionID
+      user: SessionV1.User
+      assistant?: SessionV1.WithParts
+      providerID: ProviderV2.ID
+      modelID: ModelV2.ID
+    }) =>
+      Effect.gen(function* () {
+        if (!flags.experimentalStatusClassifier) return
+        const text = input.assistant?.parts
+          .flatMap((part) => (part.type === "text" ? [part.text] : []))
+          .join("\n")
+          .trim()
+        if (!text) return
+        const ag = yield* agents.get("status-classifier")
+        if (!ag) return
+        const mdl = ag.model
+          ? yield* provider.getModel(ag.model.providerID, ag.model.modelID)
+          : ((yield* provider.getSmallModel(input.providerID)) ??
+            (yield* provider.getModel(input.providerID, input.modelID)))
+        const answer = yield* llm
+          .stream({
+            agent: ag,
+            user: input.user,
+            system: [],
+            small: true,
+            tools: {},
+            model: mdl,
+            sessionID: input.sessionID,
+            retries: 1,
+            messages: [{ role: "user", content: text.slice(-4000) }],
+          })
+          .pipe(
+            Stream.filter(LLMEvent.is.textDelta),
+            Stream.map((e) => e.text),
+            Stream.mkString,
+            Effect.orDie,
+            Effect.timeout(15_000),
+          )
+        const verdict = SessionStatus.parseIdleVerdict(answer)
+        if (!verdict) return
+        yield* status.noteIdleVerdict(input.sessionID, verdict)
+      }).pipe(
+        Effect.withSpan("SessionPrompt.classifyTurn"),
+        Effect.catchCause((cause) => Effect.logWarning("turn classification failed", { cause: Cause.pretty(cause) })),
+      )
 
     const handleSubtask = Effect.fn("SessionPrompt.handleSubtask")(function* (input: {
       task: SessionV1.SubtaskPart
@@ -343,6 +430,7 @@ const layer = Layer.effect(
               .ask({
                 ...req,
                 sessionID,
+                agent: task.agent,
                 ruleset: Permission.merge(taskAgent.permission, session.permission ?? []),
               })
               .pipe(Effect.orDie),
@@ -1126,17 +1214,34 @@ const layer = Layer.effect(
               })
             }
             yield* Effect.logInfo("exiting loop", { "session.id": sessionID })
+            yield* classifyTurn({
+              sessionID,
+              user: lastUser,
+              assistant: lastAssistantMsg,
+              providerID: lastUser.model.providerID,
+              modelID: lastUser.model.modelID,
+            })
+            yield* retitle({
+              session,
+              history: msgs,
+              providerID: lastUser.model.providerID,
+              modelID: lastUser.model.modelID,
+              user: lastUser,
+            }).pipe(Effect.ignore, Effect.forkIn(scope))
+            yield* autoSummary
+              .update({
+                sessionID,
+                agent: lastUser.agent,
+                messages: msgs,
+                providerID: lastUser.model.providerID,
+                modelID: lastUser.model.modelID,
+                user: lastUser,
+              })
+              .pipe(Effect.ignore, Effect.forkIn(scope))
             break
           }
 
           step++
-          if (step === 1)
-            yield* title({
-              session,
-              modelID: lastUser.model.modelID,
-              providerID: lastUser.model.providerID,
-              history: msgs,
-            }).pipe(Effect.ignore, Effect.forkIn(scope))
 
           const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
           const task = tasks.pop()
@@ -1622,6 +1727,7 @@ export const node = LayerNode.make({
     SessionSummary.node,
     SystemPrompt.node,
     LLM.node,
+    SessionAutoSummary.node,
     EventV2Bridge.node,
     RuntimeFlags.node,
     Database.node,

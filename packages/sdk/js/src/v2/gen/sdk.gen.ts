@@ -46,6 +46,8 @@ import type {
   ExperimentalSessionBackgroundResponses,
   ExperimentalSessionListErrors,
   ExperimentalSessionListResponses,
+  ExperimentalSessionStatusListErrors,
+  ExperimentalSessionStatusListResponses,
   ExperimentalWorkspaceAdapterListErrors,
   ExperimentalWorkspaceAdapterListResponses,
   ExperimentalWorkspaceCreateErrors,
@@ -130,6 +132,8 @@ import type {
   PermissionRuleset,
   PermissionV2Reply,
   PermissionV2Source,
+  PermissionValidatorHealthErrors,
+  PermissionValidatorHealthResponses,
   ProjectCommands,
   ProjectCurrentErrors,
   ProjectCurrentResponses,
@@ -201,6 +205,8 @@ import type {
   SessionMessageResponses,
   SessionMessagesErrors,
   SessionMessagesResponses,
+  SessionPermissionDecisionsErrors,
+  SessionPermissionDecisionsResponses,
   SessionPromptAsyncErrors,
   SessionPromptAsyncResponses,
   SessionPromptErrors,
@@ -802,6 +808,21 @@ export class Console extends HeyApiClient {
   }
 }
 
+export class Status extends HeyApiClient {
+  /**
+   * List session statuses
+   *
+   * Get the persisted status of every session across projects, including when it last changed and an optional short detail.
+   */
+  public list<ThrowOnError extends boolean = false>(options?: Options<never, ThrowOnError>) {
+    return (options?.client ?? this.client).get<
+      ExperimentalSessionStatusListResponses,
+      ExperimentalSessionStatusListErrors,
+      ThrowOnError
+    >({ url: "/experimental/session/status", ...options })
+  }
+}
+
 export class Session extends HeyApiClient {
   /**
    * List sessions
@@ -883,6 +904,11 @@ export class Session extends HeyApiClient {
       ...options,
       ...params,
     })
+  }
+
+  private _status?: Status
+  get status(): Status {
+    return (this._status ??= new Status({ client: this.client }))
   }
 }
 
@@ -3082,6 +3108,42 @@ export class Question extends HeyApiClient {
   }
 }
 
+export class Validator extends HeyApiClient {
+  /**
+   * Permission validator health
+   *
+   * Ping the LLM permission validator model used in auto mode. Intended for mode-switch checks, not per-request polling — there is no response cache.
+   */
+  public health<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<
+      PermissionValidatorHealthResponses,
+      PermissionValidatorHealthErrors,
+      ThrowOnError
+    >({
+      url: "/permission/validator/health",
+      ...options,
+      ...params,
+    })
+  }
+}
+
 export class Permission extends HeyApiClient {
   /**
    * List pending permissions
@@ -3195,6 +3257,11 @@ export class Permission extends HeyApiClient {
         ...params.headers,
       },
     })
+  }
+
+  private _validator?: Validator
+  get validator(): Validator {
+    return (this._validator ??= new Validator({ client: this.client }))
   }
 }
 
@@ -3659,6 +3726,42 @@ export class Session2 extends HeyApiClient {
     )
     return (options?.client ?? this.client).get<SessionTodoResponses, SessionTodoErrors, ThrowOnError>({
       url: "/session/{sessionID}/todo",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * List permission decisions
+   *
+   * Get the LLM permission validator audit trail for a session (auto mode), oldest first.
+   */
+  public permissionDecisions<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<
+      SessionPermissionDecisionsResponses,
+      SessionPermissionDecisionsErrors,
+      ThrowOnError
+    >({
+      url: "/session/{sessionID}/permission_decisions",
       ...options,
       ...params,
     })
