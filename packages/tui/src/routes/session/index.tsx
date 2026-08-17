@@ -26,7 +26,8 @@ import { useTuiPaths, useTuiTerminalEnvironment } from "../../context/runtime"
 import { Spinner } from "../../component/spinner"
 import { createSyntaxStyleMemo, generateSubtleSyntax, selectedForeground, useTheme } from "../../context/theme"
 import { BoxRenderable, ScrollBoxRenderable, addDefaultParsers, TextAttributes, RGBA } from "@opentui/core"
-import { Prompt, type PromptRef } from "../../component/prompt"
+import { Prompt } from "../../component/prompt"
+import type { TuiPromptRef } from "@opencode-ai/plugin/tui"
 import type {
   AssistantMessage,
   Part,
@@ -51,6 +52,7 @@ import { DialogMessage } from "./dialog-message"
 import type { PromptInfo } from "../../component/prompt/history"
 import { DialogConfirm } from "../../ui/dialog-confirm"
 import { DialogTimeline } from "./dialog-timeline"
+import { DialogDecisions } from "./dialog-decisions"
 import { DialogForkFromTimeline } from "./dialog-fork-from-timeline"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
 import { Sidebar } from "./sidebar"
@@ -61,7 +63,7 @@ import { errorMessage } from "../../util/error"
 import { Toast, useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv.tsx"
 import stripAnsi from "strip-ansi"
-import { usePromptRef } from "../../context/prompt"
+import { canStashPromptForSessions, usePromptRef } from "../../context/prompt"
 import { useEpilogue } from "../../context/epilogue"
 import { normalizePath } from "../../util/path"
 import { PermissionPrompt } from "./permission"
@@ -117,6 +119,7 @@ const sessionBindingCommands = [
   "session.share",
   "session.rename",
   "session.timeline",
+  "session.decisions",
   "session.fork",
   "session.compact",
   "session.unshare",
@@ -345,8 +348,8 @@ export function Session() {
 
   let seeded = false
   let scroll: ScrollBoxRenderable
-  let prompt: PromptRef | undefined
-  const bind = (r: PromptRef | undefined) => {
+  let prompt: TuiPromptRef | undefined
+  const bind = (r: TuiPromptRef | undefined) => {
     prompt = r
     promptRef.set(r)
     if (seeded || !route.prompt || !r) return
@@ -537,6 +540,17 @@ export function Session() {
             setPrompt={(promptInfo) => prompt?.set(promptInfo)}
           />
         ))
+      },
+    },
+    {
+      title: "Auto mode decisions",
+      value: "session.decisions",
+      category: "Session",
+      slash: {
+        name: "decisions",
+      },
+      run: () => {
+        dialog.replace(() => <DialogDecisions sessionID={route.sessionID} />)
       },
     },
     {
@@ -1096,11 +1110,20 @@ export function Session() {
       enabled: () => {
         if (session()?.parentID) return false
         if (dialog.stack.length > 0) return false
-        // Only with an empty prompt, focused or not: leaving mid-draft would
-        // surprise anyone who scrolled up with text typed.
-        return (promptRef.current?.current.input ?? "") === ""
+        // Empty prompt goes back immediately. With text typed, the gesture is
+        // only available with the cursor at the very start (where left is a
+        // no-op) and requires a confirming second press handled by the prompt.
+        const prompt = promptRef.current
+        if (!prompt) return false
+        if (prompt.current.input === "") return true
+        return canStashPromptForSessions(prompt)
       },
       run: () => {
+        const prompt = promptRef.current
+        if (prompt && prompt.current.input !== "") {
+          if (!canStashPromptForSessions(prompt)) return
+          if (prompt.stashAndClear() === "armed") return
+        }
         navigate({ type: "sessions" })
       },
     },
@@ -1855,6 +1878,8 @@ function GenericTool(props: ToolProps) {
 // Discreet marker for tool calls the LLM validator ("auto" mode) decided
 // without a human dialog, correlated through the audited callID. Only
 // allow/deny appear — uncertain/fallback already surfaced as the dialog.
+// The short model name identifies which LLM made the call; full detail lives
+// in the sidebar "Auto" section and the /decisions dialog.
 function AutoDecisionSuffix(props: { part?: ToolPart }) {
   const { theme } = useTheme()
   const ctx = use()
@@ -1866,9 +1891,13 @@ function AutoDecisionSuffix(props: { part?: ToolPart }) {
       (item) => (item.verdict === "allow" || item.verdict === "deny") && item.metadata?.callID === part.callID,
     )
   })
+  const model = createMemo(() => {
+    const value = decision()?.model
+    return value ? (value.split("/").pop() ?? value) : undefined
+  })
   return (
     <Show when={decision()}>
-      {(item) => <span style={{ fg: theme.textMuted }}>{` · auto: ${item().verdict}`}</span>}
+      {(item) => <span style={{ fg: theme.textMuted }}>{` · auto: ${item().verdict} · ${model()}`}</span>}
     </Show>
   )
 }

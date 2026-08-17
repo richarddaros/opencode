@@ -9,7 +9,7 @@ import {
   type Renderable,
 } from "@opentui/core"
 import type { CommandContext } from "@opentui/keymap"
-import { createEffect, createMemo, onMount, createSignal, onCleanup, on, Show, Switch, Match } from "solid-js"
+import { createEffect, createMemo, onMount, createSignal, onCleanup, on, For, Show, Switch, Match } from "solid-js"
 import { registerOpencodeSpinner } from "../register-spinner"
 import path from "path"
 import { fileURLToPath } from "url"
@@ -30,8 +30,32 @@ import { normalizePromptContent, openEditor } from "../../editor"
 import { useExit } from "../../context/exit"
 import { promptOffsetWidth } from "../../prompt/display"
 import { createStore, produce, unwrap } from "solid-js/store"
-import { usePromptHistory, type PromptInfo } from "../../prompt/history"
-import { computePromptTraits } from "../../prompt/traits"
+import {
+  createPromptHistoryEntry,
+  historyEntryScope,
+  shouldRetainClearedPrompt,
+  usePromptHistory,
+  type PromptInfo,
+} from "../../prompt/history"
+import {
+  promptHistoryBadgeLabel,
+  resolvePromptFooterState,
+  type PromptFooterNotice,
+  type PromptHistoryBadge,
+} from "../../prompt/footer"
+import { createStashArm, type StashGesture } from "../../prompt/stash-arm"
+import { computePromptTraits, type PromptMode } from "../../prompt/traits"
+import {
+  executeLocalCommand,
+  formatLocalCommandError,
+  formatLocalCommandResult,
+  sanitizeLocalCommandText,
+} from "../../prompt/local-command"
+import {
+  appendLocalCommandHistory,
+  moveLocalCommandHistory,
+  type LocalCommandHistoryEntry,
+} from "../../prompt/local-history"
 import { expandPastedTextPlaceholders, expandTrackedPastedText } from "../../prompt/part"
 import { usePromptStash } from "../../prompt/stash"
 import { DialogStash } from "../dialog-stash"
@@ -89,19 +113,19 @@ function pastedFilepath(value: string, platform: string) {
 export type PromptRef = {
   focused: boolean
   current: PromptInfo
+  cursorAtStart: boolean
   set(prompt: PromptInfo): void
   reset(): void
   blur(): void
   focus(): void
   submit(): void
+  stashAndClear(): "armed" | "stashed"
 }
 
 const money = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",
 })
-
-const DRAFT_RETENTION_MIN_CHARS = 20
 
 function randomIndex(count: number) {
   if (count <= 0) return 0
@@ -282,10 +306,14 @@ export function Prompt(props: PromptProps) {
 
   const [store, setStore] = createStore<{
     prompt: PromptInfo
-    mode: "normal" | "shell"
+    mode: PromptMode
     extmarkToPartIndex: Map<number, number>
     interrupt: number
     placeholder: number
+    stashArm: StashGesture | null
+    historyBadge: PromptHistoryBadge | null
+    localHistory: LocalCommandHistoryEntry[]
+    localHistoryIndex: number
   }>({
     placeholder: randomIndex(list().length),
     prompt: {
@@ -295,6 +323,34 @@ export function Prompt(props: PromptProps) {
     mode: "normal",
     extmarkToPartIndex: new Map(),
     interrupt: 0,
+    stashArm: null,
+    historyBadge: null,
+    localHistory: [],
+    localHistoryIndex: 0,
+  })
+
+  const stashArm = createStashArm({
+    current: () => store.stashArm,
+    set: (value) => setStore("stashArm", value),
+  })
+  onCleanup(() => stashArm.dispose())
+
+  const footerState = createMemo(() =>
+    resolvePromptFooterState({
+      status: status().type,
+      stashArm: store.stashArm,
+      historyBadge: store.historyBadge,
+    }),
+  )
+  const busyFooterNotice = createMemo(() => {
+    const state = footerState()
+    if (state.type !== "busy") return undefined
+    return state.notice ?? undefined
+  })
+  const idleFooterNotice = createMemo(() => {
+    const state = footerState()
+    if (state.type === "stash" || state.type === "history") return state
+    return undefined
   })
 
   createEffect(
@@ -302,6 +358,8 @@ export function Prompt(props: PromptProps) {
       () => props.sessionID,
       () => {
         setStore("placeholder", randomIndex(list().length))
+        setStore("localHistory", [])
+        setStore("localHistoryIndex", 0)
       },
       { defer: true },
     ),
@@ -393,13 +451,25 @@ export function Prompt(props: PromptProps) {
         name: "session.interrupt",
         category: "Session",
         hidden: true,
-        enabled: status().type !== "idle",
+        enabled: status().type !== "idle" || store.prompt.input !== "",
         run: () => {
           if (auto()?.visible) return
           if (!input.focused) return
           // TODO: this should be its own command
           if (store.mode === "shell") {
             setStore("mode", "normal")
+            return
+          }
+          if (store.mode === "local") {
+            exitLocalMode()
+            return
+          }
+          // With text typed, escape stashes the draft into the prompt history
+          // on a confirmed double press instead of interrupting the session.
+          if (store.prompt.input !== "") {
+            if (!stashArm.press("esc")) return
+            stashAndClear()
+            dialog.clear()
             return
           }
           if (!props.sessionID) return
@@ -585,6 +655,14 @@ export function Prompt(props: PromptProps) {
     get current() {
       return store.prompt
     },
+    get cursorAtStart() {
+      return input.visualCursor.offset === 0
+    },
+    stashAndClear() {
+      if (!stashArm.press("left")) return "armed"
+      stashAndClear()
+      return "stashed"
+    },
     focus() {
       input.focus()
     },
@@ -624,7 +702,7 @@ export function Prompt(props: PromptProps) {
   })
 
   onCleanup(() => {
-    if (store.prompt.input) {
+    if (store.mode !== "local" && store.prompt.input) {
       stashed = { prompt: unwrap(store.prompt), cursor: input.cursorOffset }
     }
     setInputTarget(undefined)
@@ -738,8 +816,9 @@ export function Prompt(props: PromptProps) {
         title: "Stash prompt",
         name: "prompt.stash",
         category: "Prompt",
-        enabled: !!store.prompt.input,
+        enabled: store.mode !== "local" && !!store.prompt.input,
         run: () => {
+          if (store.mode === "local") return
           if (!store.prompt.input) return
           stash.push({
             input: store.prompt.input,
@@ -756,8 +835,9 @@ export function Prompt(props: PromptProps) {
         title: "Stash pop",
         name: "prompt.stash.pop",
         category: "Prompt",
-        enabled: stash.list().length > 0,
+        enabled: store.mode !== "local" && stash.list().length > 0,
         run: () => {
+          if (store.mode === "local") return
           const entry = stash.pop()
           if (entry) {
             input.setText(entry.input)
@@ -772,8 +852,9 @@ export function Prompt(props: PromptProps) {
         title: "Stash list",
         name: "prompt.stash.list",
         category: "Prompt",
-        enabled: stash.list().length > 0,
+        enabled: store.mode !== "local" && stash.list().length > 0,
         run: () => {
+          if (store.mode === "local") return
           dialog.replace(() => (
             <DialogStash
               onSelect={(entry) => {
@@ -863,6 +944,48 @@ export function Prompt(props: PromptProps) {
       target: inputTarget,
       enabled: (() => {
         cursorVersion()
+        return (
+          inputTarget() !== undefined &&
+          !props.disabled &&
+          store.mode === "shell" &&
+          !auto()?.visible &&
+          input?.plainText === ""
+        )
+      })(),
+      bindings: [
+        {
+          key: "!",
+          desc: "Local mode",
+          group: "Prompt",
+          cmd: () => {
+            if (!props.sessionID) {
+              toast.show({ message: "Open a session before running a local command.", variant: "error" })
+              return
+            }
+            stashed = undefined
+            setStore("placeholder", randomIndex(shell().length))
+            setStore("localHistory", [])
+            setStore("localHistoryIndex", 0)
+            setStore("mode", "local")
+          },
+        },
+      ],
+    }
+  })
+
+  useBindings(() => {
+    return {
+      target: inputTarget,
+      enabled: inputTarget() !== undefined && store.mode === "local",
+      bindings: [{ key: "escape", desc: "Exit local mode", group: "Prompt", cmd: exitLocalMode }],
+    }
+  })
+
+  useBindings(() => {
+    return {
+      target: inputTarget,
+      enabled: (() => {
+        cursorVersion()
         return inputTarget() !== undefined && !props.disabled && !auto()?.visible && input !== undefined
       })(),
       commands: [
@@ -871,18 +994,31 @@ export function Prompt(props: PromptProps) {
           title: "Previous prompt history",
           category: "Prompt",
           run() {
+            if (store.mode === "local") {
+              const item = moveLocalCommandHistory(store.localHistory, store.localHistoryIndex, -1)
+              if (!item) return false
+              input.extmarks.clear()
+              input.setText(item.command)
+              setStore("prompt", { input: item.command, parts: [] })
+              setStore("extmarkToPartIndex", new Map())
+              setStore("localHistoryIndex", item.index)
+              input.cursorOffset = 0
+              return true
+            }
             if (input.cursorOffset !== 0) {
               if (input.scrollY + input.visualCursor.visualRow === 0) input.cursorOffset = 0
               return false
             }
 
-            const item = history.move(-1, input.plainText)
+            const item = history.move(-1, input.plainText, props.sessionID)
             if (!item) return false
             input.setText(item.input)
             setStore("prompt", item)
             setStore("mode", item.mode ?? "normal")
             restoreExtmarksFromParts(item.parts)
             input.cursorOffset = 0
+            setStore("historyBadge", historyBadgeFor(item))
+            return true
           },
         },
       ],
@@ -903,6 +1039,17 @@ export function Prompt(props: PromptProps) {
           title: "Next prompt history",
           category: "Prompt",
           run() {
+            if (store.mode === "local") {
+              const item = moveLocalCommandHistory(store.localHistory, store.localHistoryIndex, 1)
+              if (!item) return false
+              input.extmarks.clear()
+              input.setText(item.command)
+              setStore("prompt", { input: item.command, parts: [] })
+              setStore("extmarkToPartIndex", new Map())
+              setStore("localHistoryIndex", item.index)
+              input.cursorOffset = input.plainText.length
+              return true
+            }
             if (input.cursorOffset !== input.plainText.length) {
               if (
                 input.scrollY + input.visualCursor.visualRow ===
@@ -912,13 +1059,15 @@ export function Prompt(props: PromptProps) {
               return false
             }
 
-            const item = history.move(1, input.plainText)
+            const item = history.move(1, input.plainText, props.sessionID)
             if (!item) return false
             input.setText(item.input)
             setStore("prompt", item)
             setStore("mode", item.mode ?? "normal")
             restoreExtmarksFromParts(item.parts)
             input.cursorOffset = input.plainText.length
+            setStore("historyBadge", historyBadgeFor(item))
+            return true
           },
         },
       ],
@@ -957,6 +1106,18 @@ export function Prompt(props: PromptProps) {
     if (workspace.creating() || move.creating()) return false
     if (auto()?.visible) return false
     if (!store.prompt.input) return false
+    if (store.mode === "local") {
+      const inputText = expandTrackedPastedText(
+        store.prompt.input,
+        input.extmarks.getAllForTypeId(promptPartTypeId).flatMap((extmark) => {
+          const partIndex = store.extmarkToPartIndex.get(extmark.id)
+          const part = partIndex === undefined ? undefined : store.prompt.parts[partIndex]
+          if (part?.type !== "text") return []
+          return [{ start: extmark.start, end: extmark.end, text: part.text }]
+        }),
+      )
+      return submitLocalCommand(inputText)
+    }
     const agent = local.agent.current()
     if (!agent) return false
     const trimmed = store.prompt.input.trim()
@@ -1118,10 +1279,14 @@ export function Prompt(props: PromptProps) {
         })
       if (editorParts.length > 0) editor.markSelectionSent()
     }
-    history.append({
-      ...store.prompt,
-      mode: currentMode,
-    })
+    history.append(
+      createPromptHistoryEntry(store.prompt, {
+        mode: currentMode,
+        sessionID,
+        origin: "submit",
+      }),
+    )
+    setStore("historyBadge", null)
     input.extmarks.clear()
     setStore("prompt", {
       input: "",
@@ -1143,6 +1308,62 @@ export function Prompt(props: PromptProps) {
     input.clear()
     if (finishMoveProgress) move.finishSubmit()
     return true
+  }
+
+  async function submitLocalCommand(command: string) {
+    if (!props.sessionID) {
+      toast.show({ message: "Open a session before running a local command.", variant: "error" })
+      return false
+    }
+    if (!sdk.directory) {
+      toast.show({ message: "The active session has no local directory.", variant: "error" })
+      return false
+    }
+    setStore("historyBadge", null)
+    input.extmarks.clear()
+    setStore("prompt", {
+      input: "",
+      parts: [],
+    })
+    setStore("extmarkToPartIndex", new Map())
+    input.clear()
+    setStore("localHistoryIndex", 0)
+    try {
+      const result = await executeLocalCommand({
+        command,
+        directory: sdk.directory,
+      })
+      setStore("localHistory", (entries) =>
+        appendLocalCommandHistory(entries, {
+          command,
+          output: formatLocalCommandResult(result),
+          failed: result.exitCode !== 0 || result.timedOut,
+        }),
+      )
+    } catch (error) {
+      setStore("localHistory", (entries) =>
+        appendLocalCommandHistory(entries, {
+          command,
+          output: formatLocalCommandError(error),
+          failed: true,
+        }),
+      )
+    }
+    return true
+  }
+
+  function exitLocalMode() {
+    setStore("historyBadge", null)
+    input.clear()
+    input.extmarks.clear()
+    setStore("prompt", {
+      input: "",
+      parts: [],
+    })
+    setStore("extmarkToPartIndex", new Map())
+    setStore("localHistory", [])
+    setStore("localHistoryIndex", 0)
+    setStore("mode", "shell")
   }
 
   function pasteText(text: string, virtualText: string) {
@@ -1269,11 +1490,14 @@ export function Prompt(props: PromptProps) {
   }
 
   function clearPrompt() {
-    if (store.prompt.input.trim().length >= DRAFT_RETENTION_MIN_CHARS || store.prompt.parts.length > 0) {
-      history.append({
-        ...store.prompt,
-        mode: store.mode,
-      })
+    if (store.mode !== "local" && shouldRetainClearedPrompt(store.prompt)) {
+      history.append(
+        createPromptHistoryEntry(store.prompt, {
+          mode: store.mode,
+          sessionID: props.sessionID,
+          origin: "stash",
+        }),
+      )
     }
     input.clear()
     input.extmarks.clear()
@@ -1284,8 +1508,62 @@ export function Prompt(props: PromptProps) {
     setStore("extmarkToPartIndex", new Map())
   }
 
+  function stashAndClear() {
+    if (store.prompt.input === "" && store.prompt.parts.length === 0) return
+    if (store.mode !== "local")
+      history.append(
+        createPromptHistoryEntry(store.prompt, {
+          mode: store.mode,
+          sessionID: props.sessionID,
+          origin: "stash",
+        }),
+      )
+    setStore("historyBadge", null)
+    input.clear()
+    input.extmarks.clear()
+    setStore("prompt", {
+      input: "",
+      parts: [],
+    })
+    setStore("extmarkToPartIndex", new Map())
+  }
+
+  function historyBadgeFor(item: PromptInfo) {
+    if (item.input === "" && item.parts.length === 0) return null
+    return {
+      input: item.input,
+      scope: historyEntryScope(item, props.sessionID),
+      origin: item.origin,
+    }
+  }
+
+  function renderFooterNotice(notice: PromptFooterNotice) {
+    if (notice.type === "stash") {
+      return (
+        <box paddingLeft={3}>
+          <text fg={theme.primary}>
+            {notice.gesture === "esc" ? "esc " : "← "}
+            <span style={{ fg: theme.textMuted }}>
+              {notice.gesture === "esc" ? "again to clear · saves draft" : "again for sessions · saves draft"}
+            </span>
+          </text>
+        </box>
+      )
+    }
+
+    return (
+      <box paddingLeft={3}>
+        <text fg={notice.badge.scope === "current" ? theme.accent : theme.textMuted}>
+          ↑ {promptHistoryBadgeLabel(notice.badge.scope)}
+          {notice.badge.origin === "stash" ? " · stashed" : ""}
+        </text>
+      </box>
+    )
+  }
+
   const highlight = createMemo(() => {
     if (leader()) return theme.border
+    if (store.mode === "local") return theme.warning
     if (store.mode === "shell") return theme.primary
     const agent = local.agent.current()
     if (!agent) return theme.border
@@ -1309,7 +1587,7 @@ export function Prompt(props: PromptProps) {
     return !!current
   })
 
-  const agentMetaAlpha = createFadeIn(() => !!local.agent.current(), animationsEnabled)
+  const agentMetaAlpha = createFadeIn(() => store.mode === "local" || !!local.agent.current(), animationsEnabled)
   const modelMetaAlpha = createFadeIn(() => !!local.agent.current() && store.mode === "normal", animationsEnabled)
   const variantMetaAlpha = createFadeIn(
     () => !!local.agent.current() && store.mode === "normal" && showVariant(),
@@ -1319,7 +1597,7 @@ export function Prompt(props: PromptProps) {
 
   const placeholderText = createMemo(() => {
     if (props.showPlaceholder === false) return undefined
-    if (store.mode === "shell") {
+    if (store.mode !== "normal") {
       if (!shell().length) return undefined
       const example = shell()[store.placeholder % shell().length]
       return `Run a command... "${example}"`
@@ -1357,6 +1635,20 @@ export function Prompt(props: PromptProps) {
   return (
     <>
       <box ref={(r: BoxRenderable) => (anchor = r)} visible={props.visible !== false} width="100%">
+        <Show when={store.mode === "local" && store.localHistory.length > 0}>
+          <box paddingLeft={3} paddingRight={2} paddingBottom={1} flexDirection="column" gap={1}>
+            <For each={store.localHistory.slice(-5)}>
+              {(entry) => (
+                <box flexDirection="column">
+                  <text fg={theme.warning}>$ {sanitizeLocalCommandText(entry.command)}</text>
+                  <For each={entry.output.split("\n")}>
+                    {(line) => <text fg={entry.failed ? theme.error : theme.textMuted}>{line || " "}</text>}
+                  </For>
+                </box>
+              )}
+            </For>
+          </box>
+        </Show>
         <box
           width="100%"
           border={["left"]}
@@ -1386,9 +1678,11 @@ export function Prompt(props: PromptProps) {
               onContentChange={() => {
                 const value = input.plainText
                 setStore("prompt", "input", value)
-                auto()?.onInput(value)
+                if (store.mode !== "local") auto()?.onInput(value)
                 syncExtmarksWithPromptParts()
                 setCursorVersion((value) => value + 1)
+                if (store.stashArm) stashArm.clear()
+                if (store.historyBadge && store.historyBadge.input !== value) setStore("historyBadge", null)
               }}
               onCursorChange={() => setCursorVersion((value) => value + 1)}
               onKeyDown={(e: { preventDefault(): void }) => {
@@ -1450,32 +1744,42 @@ export function Prompt(props: PromptProps) {
             />
             <box flexDirection="row" flexShrink={0} paddingTop={1} gap={1} justifyContent="space-between">
               <box flexDirection="row" gap={1}>
-                <Show when={local.agent.current()} fallback={<box height={1} />}>
-                  <>
-                    <text fg={fadeColor(highlight(), agentMetaAlpha())}>
-                      {store.mode === "shell" ? "Shell" : agentLabel()}
-                    </text>
-                    <Show when={store.mode === "normal" && local.permission.mode === "auto"}>
-                      <text fg={fadeColor(theme.textMuted, agentMetaAlpha())}>auto</text>
-                    </Show>
-                    <Show when={store.mode === "normal"}>
-                      <box flexDirection="row" gap={1}>
-                        <text fg={fadeColor(theme.textMuted, modelMetaAlpha())}>·</text>
-                        <text flexShrink={0} fg={fadeColor(leader() ? theme.textMuted : theme.text, modelMetaAlpha())}>
-                          {local.model.parsed().model}
+                <Show
+                  when={store.mode === "local"}
+                  fallback={
+                    <Show when={local.agent.current()} fallback={<box height={1} />}>
+                      <>
+                        <text fg={fadeColor(highlight(), agentMetaAlpha())}>
+                          {store.mode === "shell" ? "Shell" : agentLabel()}
                         </text>
-                        <text fg={fadeColor(theme.textMuted, modelMetaAlpha())}>{currentProviderLabel()}</text>
-                        <Show when={showVariant()}>
-                          <text fg={fadeColor(theme.textMuted, variantMetaAlpha())}>·</text>
-                          <text>
-                            <span style={{ fg: fadeColor(theme.warning, variantMetaAlpha()), bold: true }}>
-                              {local.model.variant.current()}
-                            </span>
-                          </text>
+                        <Show when={store.mode === "normal" && local.permission.mode === "auto"}>
+                          <text fg={fadeColor(theme.textMuted, agentMetaAlpha())}>auto</text>
                         </Show>
-                      </box>
+                        <Show when={store.mode === "normal"}>
+                          <box flexDirection="row" gap={1}>
+                            <text fg={fadeColor(theme.textMuted, modelMetaAlpha())}>·</text>
+                            <text
+                              flexShrink={0}
+                              fg={fadeColor(leader() ? theme.textMuted : theme.text, modelMetaAlpha())}
+                            >
+                              {local.model.parsed().model}
+                            </text>
+                            <text fg={fadeColor(theme.textMuted, modelMetaAlpha())}>{currentProviderLabel()}</text>
+                            <Show when={showVariant()}>
+                              <text fg={fadeColor(theme.textMuted, variantMetaAlpha())}>·</text>
+                              <text>
+                                <span style={{ fg: fadeColor(theme.warning, variantMetaAlpha()), bold: true }}>
+                                  {local.model.variant.current()}
+                                </span>
+                              </text>
+                            </Show>
+                          </box>
+                        </Show>
+                      </>
                     </Show>
-                  </>
+                  }
+                >
+                  <text fg={theme.warning}>Local shell</text>
                 </Show>
               </box>
               <Show when={hasRightContent()}>
@@ -1514,7 +1818,7 @@ export function Prompt(props: PromptProps) {
         </box>
         <box width="100%" flexDirection="row" justifyContent="space-between">
           <Switch>
-            <Match when={status().type !== "idle"}>
+            <Match when={footerState().type === "busy"}>
               <box
                 flexDirection="row"
                 gap={1}
@@ -1586,14 +1890,31 @@ export function Prompt(props: PromptProps) {
                     })()}
                   </box>
                 </box>
-                <text fg={store.interrupt > 0 ? theme.primary : theme.text}>
-                  esc{" "}
-                  <span style={{ fg: store.interrupt > 0 ? theme.primary : theme.textMuted }}>
-                    {store.interrupt > 0 ? "again to interrupt" : "interrupt"}
-                  </span>
-                </text>
+                <Show
+                  when={busyFooterNotice()}
+                  fallback={
+                    <Show
+                      when={store.prompt.input === ""}
+                      fallback={
+                        <text fg={theme.text}>
+                          esc <span style={{ fg: theme.textMuted }}>clear draft</span>
+                        </text>
+                      }
+                    >
+                      <text fg={store.interrupt > 0 ? theme.primary : theme.text}>
+                        esc{" "}
+                        <span style={{ fg: store.interrupt > 0 ? theme.primary : theme.textMuted }}>
+                          {store.interrupt > 0 ? "again to interrupt" : "interrupt"}
+                        </span>
+                      </text>
+                    </Show>
+                  }
+                >
+                  {(notice) => renderFooterNotice(notice())}
+                </Show>
               </box>
             </Match>
+            <Match when={idleFooterNotice()}>{(notice) => renderFooterNotice(notice())}</Match>
             <Match when={workspace.notice()}>
               {(notice) => (
                 <box paddingLeft={3}>
@@ -1684,6 +2005,11 @@ export function Prompt(props: PromptProps) {
                 <Match when={store.mode === "shell"}>
                   <text fg={theme.text}>
                     esc <span style={{ fg: theme.textMuted }}>exit shell mode</span>
+                  </text>
+                </Match>
+                <Match when={store.mode === "local"}>
+                  <text fg={theme.warning}>
+                    esc <span style={{ fg: theme.textMuted }}>exit local mode</span>
                   </text>
                 </Match>
               </Switch>

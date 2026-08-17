@@ -429,6 +429,8 @@ it.instance(
       expect(rows[0].latencyMs).toBeGreaterThanOrEqual(0)
       expect(rows[0].createdAt).toBeGreaterThan(0)
       expect(rows[0].id.length).toBeGreaterThan(0)
+      expect(rows[0].prompt).toContain("ls -la")
+      expect(rows[0].prompt).toContain("WORK SO FAR")
     }),
   { git: true },
 )
@@ -453,6 +455,64 @@ it.instance(
       const rows = yield* decisions.listBySession(chat.id)
       expect(rows).toHaveLength(1)
       expect(rows[0].metadata).toEqual({ command: "ls", callID: "call_test" })
+    }),
+  { git: true },
+)
+
+it.instance(
+  "ALLOW learns the exact pattern: an identical ask skips the validator and writes no new audit row",
+  () =>
+    Effect.gen(function* () {
+      llm.reset()
+      summaryCalls.length = 0
+      const decisions = yield* PermissionDecisionsStore.Service
+      const chat = yield* seedAutoSession()
+      llm.push(text("ALLOW"))
+
+      yield* ask({ sessionID: chat.id, agent: "auto", patterns: ["ls -la"], metadata: { command: "ls -la" } })
+      expect(llm.state.hits).toHaveLength(1)
+
+      yield* ask({ sessionID: chat.id, agent: "auto", patterns: ["ls -la"], metadata: { command: "ls -la" } })
+      expect(llm.state.hits).toHaveLength(1)
+      expect(yield* decisions.listBySession(chat.id)).toHaveLength(1)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "ALLOW does not learn wildcard patterns: the validator runs again",
+  () =>
+    Effect.gen(function* () {
+      llm.reset()
+      summaryCalls.length = 0
+      const chat = yield* seedAutoSession()
+      llm.push(text("ALLOW"))
+
+      yield* ask({ sessionID: chat.id, agent: "auto", patterns: ["ls *.ts"], metadata: { command: "ls *.ts" } })
+      expect(llm.state.hits).toHaveLength(1)
+
+      llm.push(text("ALLOW"))
+      yield* ask({ sessionID: chat.id, agent: "auto", patterns: ["ls *.ts"], metadata: { command: "ls *.ts" } })
+      expect(llm.state.hits).toHaveLength(2)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "ALLOW does not broaden: a different command still reaches the validator",
+  () =>
+    Effect.gen(function* () {
+      llm.reset()
+      summaryCalls.length = 0
+      const chat = yield* seedAutoSession()
+      llm.push(text("ALLOW"))
+
+      yield* ask({ sessionID: chat.id, agent: "auto", patterns: ["ls -la"], metadata: { command: "ls -la" } })
+      expect(llm.state.hits).toHaveLength(1)
+
+      llm.push(text("ALLOW"))
+      yield* ask({ sessionID: chat.id, agent: "auto", patterns: ["ls -la src"], metadata: { command: "ls -la src" } })
+      expect(llm.state.hits).toHaveLength(2)
     }),
   { git: true },
 )
