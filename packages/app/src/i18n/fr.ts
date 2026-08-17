@@ -1196,9 +1196,4 @@ export const dict = {
 
   "titlebar.update": "Mettre à jour",
   "titlebar.updateVersion": "Mettre à jour {{version}}",
-  "dialog.provider.custom.label": "Fournisseur personnalisé compatible avec OpenAI",
-  "dialog.model.unpaid.viewMoreProviders": "Voir plus de 70 fournisseurs",
-  "session.header.reveal.finder": "Afficher dans le Finder",
-  "session.header.reveal.fileExplorer": "Afficher dans l'Explorateur de fichiers",
-  "session.header.reveal.containingFolder": "Ouvrir le dossier contenant",
 }

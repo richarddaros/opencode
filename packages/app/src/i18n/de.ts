@@ -1182,9 +1182,4 @@ export const dict = {
   "help.tabs.persistence": "Wenn Sie die App erneut öffnen, sind Ihre Tabs weiterhin geöffnet.",
   "help.tabs.worktrees":
     "Das neue Design unterstützt Git-Worktrees noch nicht. Diese Funktion folgt in Kürze. Wenn Sie das bisherige Layout vorerst weiterverwenden möchten, können Sie in den Einstellungen zwischen den Layouts wechseln. Beachten Sie jedoch, dass das neue Layout in einigen Wochen dauerhaft verwendet wird.",
-  "dialog.provider.custom.label": "Benutzerdefinierter OpenAI-kompatibler Anbieter",
-  "dialog.model.unpaid.viewMoreProviders": "Über 70 weitere Anbieter anzeigen",
-  "session.header.reveal.finder": "Im Finder anzeigen",
-  "session.header.reveal.fileExplorer": "Im Datei-Explorer anzeigen",
-  "session.header.reveal.containingFolder": "Enthaltenden Ordner öffnen",
 } satisfies Partial<Record<Keys, string>>
