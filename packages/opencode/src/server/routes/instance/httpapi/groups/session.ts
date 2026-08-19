@@ -83,7 +83,6 @@ export const PermissionDecision = Schema.Struct({
   metadata: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
   verdict: Schema.Literals(["allow", "deny", "uncertain", "fallback"]),
   reason: Schema.optional(Schema.String),
-  prompt: Schema.optional(Schema.String),
   model: Schema.String,
   latency_ms: Schema.Number,
   created_at: Schema.Number,

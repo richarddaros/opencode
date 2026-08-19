@@ -80,12 +80,6 @@ function DialogDecisionDetail(props: { item: PermissionDecision }) {
               <text fg={theme.text}>{item().reason}</text>
             </box>
           </Show>
-          <Show when={item().prompt}>
-            <text fg={theme.textMuted}>prompt:</text>
-            <box paddingLeft={2}>
-              <text fg={theme.text}>{item().prompt}</text>
-            </box>
-          </Show>
         </box>
       </scrollbox>
     </box>

@@ -21,9 +21,6 @@ export interface Insert {
   readonly metadata?: Record<string, unknown>
   readonly verdict: Verdict
   readonly reason?: string
-  // The exact user message sent to the validator model; absent when no model
-  // call happened (truncated payload, early fallbacks).
-  readonly prompt?: string
   readonly model: string
   readonly latencyMs: number
 }
@@ -36,6 +33,14 @@ export interface Info extends Insert {
 export interface Interface {
   readonly insert: (decision: Insert) => Effect.Effect<void>
   readonly listBySession: (sessionID: SessionSchema.ID) => Effect.Effect<Info[]>
+}
+
+function redactPatterns(patterns: readonly string[]) {
+  return patterns.map((_, index) => `<redacted:${index + 1}>`)
+}
+
+function redactMetadata(metadata: Record<string, unknown> | undefined) {
+  return typeof metadata?.callID === "string" ? { callID: metadata.callID } : undefined
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/session/PermissionDecisionsStore") {}
@@ -52,11 +57,10 @@ const layer = Layer.effect(
           id: Identifier.ascending("decision"),
           session_id: decision.sessionID,
           permission: decision.permission,
-          patterns: decision.patterns,
-          metadata: decision.metadata,
+          patterns: redactPatterns(decision.patterns),
+          metadata: redactMetadata(decision.metadata),
           verdict: decision.verdict,
           reason: decision.reason,
-          prompt: decision.prompt,
           model: decision.model,
           latency_ms: decision.latencyMs,
         })
@@ -77,11 +81,10 @@ const layer = Layer.effect(
           id: row.id,
           sessionID: row.session_id,
           permission: row.permission,
-          patterns: row.patterns,
-          metadata: row.metadata ?? undefined,
+          patterns: redactPatterns(row.patterns),
+          metadata: redactMetadata(row.metadata ?? undefined),
           verdict: row.verdict,
           reason: row.reason ?? undefined,
-          prompt: row.prompt ?? undefined,
           model: row.model,
           latencyMs: row.latency_ms,
           createdAt: row.created_at,

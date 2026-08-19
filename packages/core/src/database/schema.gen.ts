@@ -154,7 +154,6 @@ export default {
           \`metadata\` text,
           \`verdict\` text NOT NULL,
           \`reason\` text,
-          \`prompt\` text,
           \`model\` text NOT NULL,
           \`latency_ms\` integer NOT NULL,
           \`created_at\` integer NOT NULL,

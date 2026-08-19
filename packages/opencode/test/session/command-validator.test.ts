@@ -421,16 +421,15 @@ it.instance(
       expect(rows[0]).toMatchObject({
         sessionID: chat.id,
         permission: "bash",
-        patterns: ["ls -la"],
-        metadata: { command: "ls -la" },
+        patterns: ["<redacted:1>"],
+        metadata: undefined,
         verdict: "allow",
         model: "test/test-model",
       })
       expect(rows[0].latencyMs).toBeGreaterThanOrEqual(0)
       expect(rows[0].createdAt).toBeGreaterThan(0)
       expect(rows[0].id.length).toBeGreaterThan(0)
-      expect(rows[0].prompt).toContain("ls -la")
-      expect(rows[0].prompt).toContain("WORK SO FAR")
+      expect(rows[0]).not.toHaveProperty("prompt")
     }),
   { git: true },
 )
@@ -505,7 +504,7 @@ it.instance(
 
       const rows = yield* decisions.listBySession(chat.id)
       expect(rows).toHaveLength(1)
-      expect(rows[0].metadata).toEqual({ command: "ls", callID: "call_test" })
+      expect(rows[0].metadata).toEqual({ callID: "call_test" })
     }),
   { git: true },
 )
@@ -707,11 +706,26 @@ it.instance(
         gated(three, () => started.push("three")),
       )
 
-      const a = yield* ask({ sessionID: chat.id, agent: "auto", patterns: ["cmd-one"] }).pipe(Effect.forkScoped)
+      const a = yield* ask({
+        sessionID: chat.id,
+        agent: "auto",
+        patterns: ["cmd-one"],
+        tool: { messageID: "msg_one", callID: "call_one" },
+      }).pipe(Effect.forkScoped)
       yield* poll(() => started.length === 1, "first validation never started")
-      const b = yield* ask({ sessionID: chat.id, agent: "auto", patterns: ["cmd-two"] }).pipe(Effect.forkScoped)
+      const b = yield* ask({
+        sessionID: chat.id,
+        agent: "auto",
+        patterns: ["cmd-two"],
+        tool: { messageID: "msg_two", callID: "call_two" },
+      }).pipe(Effect.forkScoped)
       yield* Effect.sleep("50 millis")
-      const c = yield* ask({ sessionID: chat.id, agent: "auto", patterns: ["cmd-three"] }).pipe(Effect.forkScoped)
+      const c = yield* ask({
+        sessionID: chat.id,
+        agent: "auto",
+        patterns: ["cmd-three"],
+        tool: { messageID: "msg_three", callID: "call_three" },
+      }).pipe(Effect.forkScoped)
       yield* Effect.sleep("50 millis")
       expect(started).toEqual(["one"])
 
@@ -726,7 +740,9 @@ it.instance(
       yield* Effect.all([Fiber.join(a), Fiber.join(b), Fiber.join(c)])
       expect(llm.state.maxInFlight).toBe(1)
       const rows = yield* decisions.listBySession(chat.id)
-      expect(rows.map((row) => row.patterns[0])).toEqual(["cmd-one", "cmd-two", "cmd-three"])
+      // patterns sao redigidos no audit; o callID e o identificador que
+      // sobrevive de proposito, entao a ordem se verifica por ele.
+      expect(rows.map((row) => row.metadata?.callID)).toEqual(["call_one", "call_two", "call_three"])
     }),
   { git: true },
 )
@@ -799,12 +815,27 @@ itFast.instance(
         gated(three, () => started.push("three")),
       )
 
-      const a = yield* ask({ sessionID: chat.id, agent: "auto", patterns: ["cmd-one"] }).pipe(Effect.forkScoped)
+      const a = yield* ask({
+        sessionID: chat.id,
+        agent: "auto",
+        patterns: ["cmd-one"],
+        tool: { messageID: "msg_one", callID: "call_one" },
+      }).pipe(Effect.forkScoped)
       yield* poll(() => started.length === 1, "first validation never started")
-      const b = yield* ask({ sessionID: chat.id, agent: "auto", patterns: ["cmd-two"] }).pipe(Effect.forkScoped)
+      const b = yield* ask({
+        sessionID: chat.id,
+        agent: "auto",
+        patterns: ["cmd-two"],
+        tool: { messageID: "msg_two", callID: "call_two" },
+      }).pipe(Effect.forkScoped)
       yield* Effect.sleep("100 millis")
       expect(started).toEqual(["one"])
-      const c = yield* ask({ sessionID: chat.id, agent: "auto", patterns: ["cmd-three"] }).pipe(Effect.forkScoped)
+      const c = yield* ask({
+        sessionID: chat.id,
+        agent: "auto",
+        patterns: ["cmd-three"],
+        tool: { messageID: "msg_three", callID: "call_three" },
+      }).pipe(Effect.forkScoped)
       yield* Effect.sleep("100 millis")
       expect(started).toEqual(["one"])
 
@@ -838,11 +869,11 @@ itFast.instance(
         }),
       )
       // b's expiry audit and c's audit race at the deadline, so compare by
-      // pattern rather than row order.
-      const byPattern = new Map(rows.map((row) => [row.patterns[0], row]))
-      expect(byPattern.get("cmd-one")?.verdict).toBe("allow")
-      expect(byPattern.get("cmd-two")).toMatchObject({ verdict: "fallback", reason: "timeout", model: "unknown" })
-      expect(byPattern.get("cmd-three")?.verdict).toBe("allow")
+      // callID rather than row order — patterns are redacted in the audit.
+      const byCall = new Map(rows.map((row) => [row.metadata?.callID, row]))
+      expect(byCall.get("call_one")?.verdict).toBe("allow")
+      expect(byCall.get("call_two")).toMatchObject({ verdict: "fallback", reason: "timeout", model: "unknown" })
+      expect(byCall.get("call_three")?.verdict).toBe("allow")
     }),
   { git: true },
 )

@@ -2709,7 +2709,6 @@ export type PermissionDecision = {
   }
   verdict: "allow" | "deny" | "uncertain" | "fallback"
   reason?: string
-  prompt?: string
   model: string
   latency_ms: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
   created_at: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"

@@ -45,7 +45,7 @@ describe("PermissionDecisionsStore", () => {
         sessionID,
         permission: "bash",
         patterns: ["rm -rf /tmp/build"],
-        metadata: { cwd: "/project" },
+        metadata: { callID: "call-1", cwd: "/project" },
         verdict: "deny",
         reason: "destructive command",
         model: "openrouter/anthropic/claude-haiku-4.5",
@@ -65,8 +65,8 @@ describe("PermissionDecisionsStore", () => {
       expect(rows[0].id.startsWith("dec_")).toBe(true)
       expect(rows[0].sessionID).toBe(sessionID)
       expect(rows[0].permission).toBe("bash")
-      expect(rows[0].patterns).toEqual(["rm -rf /tmp/build"])
-      expect(rows[0].metadata).toEqual({ cwd: "/project" })
+      expect(rows[0].patterns).toEqual(["<redacted:1>"])
+      expect(rows[0].metadata).toEqual({ callID: "call-1" })
       expect(rows[0].verdict).toBe("deny")
       expect(rows[0].reason).toBe("destructive command")
       expect(rows[0].model).toBe("openrouter/anthropic/claude-haiku-4.5")
