@@ -220,7 +220,7 @@ describe("tool.shell", () => {
 })
 
 describe("tool.shell permissions", () => {
-  each("requires a one-time destructive_bash approval without creating an always rule", () =>
+  each("requires a one-time destructive_bash approval on top of the normal bash rule", () =>
     Effect.gen(function* () {
       const tmp = yield* tmpdirScoped()
       yield* runIn(
@@ -231,6 +231,16 @@ describe("tool.shell permissions", () => {
           expect(requests).toEqual([
             expect.objectContaining({
               permission: "destructive_bash",
+              patterns: ["rm -rf build"],
+              always: [],
+            }),
+            // The destructive command must also face the normal shell ruleset:
+            // asking only for destructive_bash would let it slip past a
+            // configured `bash: "ask"` rule, so the more dangerous the command
+            // the fewer rules would apply to it. It still contributes no
+            // `always` glob, so approving once never disarms the confirmation.
+            expect.objectContaining({
+              permission: "bash",
               patterns: ["rm -rf build"],
               always: [],
             }),

@@ -134,7 +134,7 @@ As permissões do opencode são indexadas pelo nome da ferramenta, além de algu
 - `glob` — globbing de arquivos (corresponde ao padrão glob)
 - `grep` — busca de conteúdo (corresponde ao padrão regex)
 - `bash` — execução de comandos de shell (corresponde a comandos analisados como `git status --porcelain`)
-- `destructive_bash` — confirmação única para comandos de shell destrutivos ou sensíveis
+- `destructive_bash` — confirmação única para comandos de shell destrutivos ou sensíveis, pedida além da regra normal de `bash`
 - `task` — lançamento de subagentes (corresponde ao tipo de subagente)
 - `skill` — carregamento de uma habilidade (corresponde ao nome da habilidade)
 - `lsp` — execução de consultas LSP (atualmente não granular)
@@ -214,7 +214,7 @@ Depois, use o perfil `secure-development`:
 }
 ```
 
-Edições, testes, builds e inspeção de Git no projeto seguem automáticos. Operações destrutivas de shell (`rm`, `mv`, `cp` com potencial de sobrescrita, operações destrutivas de Git, reescritas in-place, ferramentas de disco, escrita no banco e publicação) usam `destructive_bash`, sempre com aprovação única e sem criar regra `always`. A rede permanece desabilitada no container; use uma integração revisada explicitamente quando a operação precisar alcançar um serviço externo.
+Edições, testes, builds e inspeção de Git no projeto seguem automáticos. Operações destrutivas de shell (`rm`, `mv`, `cp` com potencial de sobrescrita, operações destrutivas de Git, reescritas in-place, ferramentas de disco, escrita no banco e publicação) usam `destructive_bash`, sempre com aprovação única e sem criar regra `always`. O comando continua sendo avaliado também pela regra normal de `bash`, de modo que ser destrutivo nunca o faz escapar de um `bash: "ask"` configurado. A rede permanece desabilitada no container; use uma integração revisada explicitamente quando a operação precisar alcançar um serviço externo.
 
 O sandbox não substitui permissões do projeto: `external_directory` continua em `ask`, e o workspace montado é gravável de propósito para que o agente desenvolva nele. Não defina `bash: "allow"` global sem isolamento por sandbox ou as guardrails de host abaixo.
 

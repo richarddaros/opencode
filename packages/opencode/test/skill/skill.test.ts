@@ -16,7 +16,16 @@ import fs from "fs/promises"
 
 const node = LayerNode.compile(CrossSpawnSpawner.node)
 
-const it = testEffect(Layer.mergeAll(LayerNode.compile(Skill.node), node, testInstanceStoreLayer))
+// Pin the flag instead of inheriting it: a developer with
+// OPENCODE_DISABLE_CLAUDE_CODE_SKILLS set in their shell would otherwise see
+// every .claude/skills discovery test fail. Mirrors itWithoutClaudeCodeSkills.
+const it = testEffect(
+  Layer.mergeAll(
+    LayerNode.compile(Skill.node, [[RuntimeFlags.node, RuntimeFlags.layer({ disableClaudeCodeSkills: false })]]),
+    node,
+    testInstanceStoreLayer,
+  ),
+)
 const itWithoutClaudeCodeSkills = testEffect(
   Layer.mergeAll(
     LayerNode.compile(Skill.node, [[RuntimeFlags.node, RuntimeFlags.layer({ disableClaudeCodeSkills: true })]]),

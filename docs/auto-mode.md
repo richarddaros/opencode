@@ -88,7 +88,9 @@ releases, so asks queued behind it drain normally. Each validation:
    `UNCERTAIN <reason>` (reasons are capped at 100 characters by the prompt
    and at 200 code points by the parser, in the session's language).
 5. Writes exactly one `permission_decisions` row with the verdict, reason,
-   model, latency, and the exact prompt sent to the validator. The audit
+   model, and latency. The prompt is never persisted, `patterns` are stored as
+   `<redacted:N>`, and only the tool `callID` survives in `metadata` — commands,
+   paths, and diffs can carry secrets. The audit
    write never breaks or blocks the ask itself
    — with one exception: an `ALLOW` whose audit row fails to land degrades to
    the human flow instead of executing without evidence. The audit write

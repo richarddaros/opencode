@@ -443,6 +443,12 @@ export const ShellTool = Tool.define(
 
         if (tokens.length && (!cmd || !CWD.has(cmd)) && ShellSafety.requiresConfirmation(tokens)) {
           scan.protected.add(source(node))
+          // Still subject to the normal shell ruleset: skipping it would make a
+          // destructive command escape a configured `bash: "ask"` rule, so the
+          // more dangerous the command the fewer rules applied to it.
+          scan.patterns.add(source(node))
+          // Deliberately not added to `scan.always`: learning a prefix glob for
+          // a destructive command would disarm the confirmation from then on.
           continue
         }
 

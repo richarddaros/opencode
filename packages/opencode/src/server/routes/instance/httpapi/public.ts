@@ -152,6 +152,13 @@ function matchLegacyOpenApi(input: Record<string, unknown>) {
         const response = operation.responses?.["200"]?.content?.["application/json"]
         if (response?.schema) response.schema = nullable(response.schema)
       }
+      if (path === "/session/{sessionID}/auto_summary") {
+        // The handler returns null when the session has no summary row yet, so
+        // the legacy schema has to admit it or the generated SDK rejects the
+        // response.
+        const response = operation.responses?.["200"]?.content?.["application/json"]
+        if (response?.schema) response.schema = nullable(response.schema)
+      }
       if (!isV2Api) {
         // Auth is still runtime middleware outside the legacy public OpenAPI
         // metadata, so the legacy SDK should not expose auth schemes or

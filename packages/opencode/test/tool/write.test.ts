@@ -181,7 +181,11 @@ describe("tool.write", () => {
 
         if (process.platform !== "win32") {
           const stats = yield* Effect.promise(() => fs.stat(filepath))
-          expect(stats.mode & 0o777).toBe(0o644)
+          // The tool doesn't force a mode, so the file lands at 0666 masked by
+          // the process umask: 0644 under the usual 022, 0664 under a 002.
+          // Deriving it keeps the assertion honest on any developer machine
+          // instead of only where umask happens to be 022.
+          expect(stats.mode & 0o777).toBe(0o666 & ~process.umask())
         }
       }),
     )

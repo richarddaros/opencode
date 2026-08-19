@@ -71,7 +71,26 @@ The validator answers one of three verdicts:
 
 The flow is fail-closed: on timeout (15s), error, or an unparseable answer, the request falls back to the normal approval dialog. A validator failure never approves or rejects on its own. When the validator is unreachable, the TUI warns once on activation and the session behaves like Build.
 
-Every decision is written to a `permission_decisions` audit table (no TTL) with the verdict, reason, model, and latency, readable via `GET /session/:sessionID/permission_decisions` on the server or plain SQL. The validator and its session summarizer are configurable via `agent.command-validator` and `agent.session-summarizer` — see the [agents docs](/docs/agents#use-auto) and the `docs/auto-mode.md` design record in the repository for the full flow, configuration examples, and failure modes.
+Every decision is written to a `permission_decisions` audit table (no TTL) with the verdict, reason, model, and latency, readable via `GET /session/:sessionID/permission_decisions` on the server or plain SQL. The audit never stores the prompt sent to the validator; `patterns` are recorded as `<redacted:N>` and only the tool `callID` is kept in `metadata`, because commands, paths, and diffs can carry secrets. The validator and its session summarizer are configurable via `agent.command-validator` and `agent.session-summarizer` — see the [agents docs](/docs/agents#use-auto) and the `docs/auto-mode.md` design record in the repository for the full flow, configuration examples, and failure modes.
+
+### Choose the validator per session
+
+Inside a session, open the command palette and choose **Choose permission validator**. You can inherit the normal small-model resolution, select an exact `provider/model`, or choose **Disable session validator**. Disabling the validator keeps the normal human permission dialog; it does not allow commands automatically. The selection is persisted for that session and can change while the session is running.
+
+The same setting is available through the local API:
+
+```bash
+curl -X PATCH "http://127.0.0.1:4096/session/SESSION_ID/permission-validator" \
+  -H 'content-type: application/json' \
+  -H 'x-opencode-directory: /path/to/project' \
+  -d '{"config":{"mode":"model","model":"provider/model"}}'
+```
+
+Use `{"config":{"mode":"inherit"}}` to select the session default,
+`{"config":{"mode":"disabled"}}` to keep human approval, or
+`{"config":null}` to clear the session override. This is separate from
+`--auto`, which broadly approves pending asks.
+
 
 ---
 
@@ -190,7 +209,7 @@ OpenCode permissions are keyed by tool name, plus a couple of safety guards:
 - `glob` — file globbing (matches the glob pattern)
 - `grep` — content search (matches the regex pattern)
 - `bash` — running shell commands (matches parsed commands like `git status --porcelain`)
-- `destructive_bash` — one-time confirmation for destructive or sensitive shell commands
+- `destructive_bash` — one-time confirmation for destructive or sensitive shell commands, asked in addition to the normal `bash` rule
 - `task` — launching subagents (matches the subagent type)
 - `skill` — loading a skill (matches the skill name)
 - `lsp` — running LSP queries (currently non-granular)
@@ -271,7 +290,7 @@ Then use the secure-development profile:
 }
 ```
 
-Normal project work such as edits, tests, builds, and Git inspection stays autonomous. Destructive shell operations (`rm`, `mv`, potentially overwriting `cp`, destructive Git operations, in-place rewrites, disk tools, database writes, and publishing) use `destructive_bash`, which is one-time only and cannot create an `always` rule. Network access remains disabled in the container; use an explicitly reviewed integration when an operation must reach an external service.
+Normal project work such as edits, tests, builds, and Git inspection stays autonomous. Destructive shell operations (`rm`, `mv`, potentially overwriting `cp`, destructive Git operations, in-place rewrites, disk tools, database writes, and publishing) use `destructive_bash`, which is one-time only and cannot create an `always` rule. The command is still evaluated against the normal `bash` rule as well, so being destructive never lets it bypass a configured `bash: "ask"`. Network access remains disabled in the container; use an explicitly reviewed integration when an operation must reach an external service.
 
 The sandbox is not a replacement for project permissions: `external_directory` remains `ask`, and a mounted workspace is intentionally writable so the agent can develop in it. Do not set global `bash: "allow"` without either sandbox isolation or the host guardrails below.
 
