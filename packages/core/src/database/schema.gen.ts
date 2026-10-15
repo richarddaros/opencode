@@ -77,6 +77,22 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
         );
       `)
       yield* tx.run(`
+        CREATE TABLE \`permission_decisions\` (
+          \`id\` text PRIMARY KEY,
+          \`session_id\` text NOT NULL,
+          \`permission\` text NOT NULL,
+          \`patterns\` text NOT NULL,
+          \`metadata\` text,
+          \`verdict\` text NOT NULL,
+          \`reason\` text,
+          \`prompt\` text,
+          \`model\` text NOT NULL,
+          \`latency_ms\` integer NOT NULL,
+          \`created_at\` integer NOT NULL,
+          CONSTRAINT \`fk_permission_decisions_session_id_session_v2_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session_v2\`(\`id\`) ON DELETE CASCADE
+        );
+      `)
+      yield* tx.run(`
         CREATE TABLE \`permission\` (
           \`id\` text PRIMARY KEY,
           \`project_id\` text NOT NULL,
@@ -242,6 +258,7 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
       `)
       yield* tx.run(`CREATE UNIQUE INDEX \`event_aggregate_seq_idx\` ON \`event\` (\`aggregate_id\`,\`seq\`);`)
       yield* tx.run(`CREATE INDEX \`event_aggregate_type_seq_idx\` ON \`event\` (\`aggregate_id\`,\`type\`,\`seq\`);`)
+      yield* tx.run(`CREATE INDEX \`permission_decisions_session_idx\` ON \`permission_decisions\` (\`session_id\`);`)
       yield* tx.run(
         `CREATE UNIQUE INDEX \`permission_project_action_resource_idx\` ON \`permission\` (\`project_id\`,\`action\`,\`resource\`);`,
       )

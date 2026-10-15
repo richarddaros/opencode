@@ -11,6 +11,7 @@ import { FileSystemSearch } from "@opencode/core/filesystem/search"
 import { Credential } from "@opencode/core/credential"
 import { Config } from "@opencode/core/config"
 import { PermissionSaved } from "@opencode/core/permission/saved"
+import { PermissionDecisionsStore } from "@opencode/core/permission/decisions-store"
 import { PtyTicket } from "@opencode/core/pty/ticket"
 import { PersistentPty } from "@opencode/core/persistent-pty"
 import { Project } from "@opencode/core/project"
@@ -65,6 +66,7 @@ const applicationServiceNodes = [
   SdkPlugins.node,
   PluginUpdate.node,
   PermissionSaved.node,
+  PermissionDecisionsStore.node,
   PtyTicket.node,
   PersistentPty.node,
   Credential.node,

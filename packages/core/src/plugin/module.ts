@@ -75,6 +75,12 @@ function watchTarget(file: string): Promise<Watcher.WatchInput> {
   )
 }
 
+type LegacyServerResult = { readonly event?: (arg: { readonly event: unknown }) => Promise<void> | void }
+
+function isLegacyServerResult(value: unknown): value is LegacyServerResult {
+  return typeof value === "object" && value !== null && "event" in value && typeof (value as { readonly event: unknown }).event === "function"
+}
+
 const Module = Schema.Struct({
   default: Schema.Union([
     Schema.Struct({
@@ -85,6 +91,12 @@ const Module = Schema.Struct({
       id: Schema.String,
       setup: Schema.declare<Parameters<typeof PluginPromise.fromPromise>[0]["setup"]>(
         (input): input is Parameters<typeof PluginPromise.fromPromise>[0]["setup"] => typeof input === "function",
+      ),
+    }),
+    Schema.Struct({
+      id: Schema.String,
+      server: Schema.declare<(input: unknown) => Promise<unknown> | unknown>(
+        (input): input is (input: unknown) => Promise<unknown> | unknown => typeof input === "function",
       ),
     }),
   ]),
@@ -131,7 +143,26 @@ const load = Effect.fn("PluginModule.load")(function* (
         }),
     ),
   )).default
-  const plugin = "effect" in value ? value : PluginPromise.fromPromise(value)
+  const plugin =
+    "effect" in value
+      ? value
+      : "setup" in value
+        ? PluginPromise.fromPromise(value)
+        : PluginPromise.fromPromise({
+            id: value.id,
+            setup: async (context) => {
+              const result = await value.server(context)
+              if (!isLegacyServerResult(result) || !result.event) return
+              const onEvent = result.event
+              void (async () => {
+                try {
+                  for await (const event of context.event.subscribe()) {
+                    await onEvent({ event })
+                  }
+                } catch {}
+              })()
+            },
+          })
   return {
     id: plugin.id,
     features: {

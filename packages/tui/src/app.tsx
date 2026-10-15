@@ -631,7 +631,7 @@ function App() {
   const startupPrompt = args.prompt ? { text: args.prompt, files: [], agents: [], pasted: [] } : undefined
   onMount(() => {
     batch(() => {
-      if (args.agent) local.agent.set(args.agent)
+      if (args.agent && local.agent.list().some((item) => item.id === args.agent)) local.agent.set(args.agent)
       if (args.model) {
         const { providerID, modelID } = Model.parse(args.model)
         if (!providerID || !modelID)
@@ -640,7 +640,10 @@ function App() {
             message: `Invalid model format: ${args.model}`,
             duration: 3000,
           })
-        local.model.set({ providerID, modelID }, { recent: true })
+        const models = data.location.model.list(location.ref)
+        if (models?.some((item) => item.providerID === providerID && item.id === modelID)) {
+          local.model.set({ providerID, modelID }, { recent: true })
+        }
       }
       if (args.sessionID && !args.fork) {
         route.navigate({
@@ -650,6 +653,30 @@ function App() {
         })
       }
     })
+  })
+
+  let appliedAgent = false
+  createEffect(() => {
+    if (appliedAgent || !args.agent) return
+    const list = local.agent.list()
+    if (!list.length) return
+    if (list.some((item) => item.id === args.agent)) {
+      appliedAgent = true
+      local.agent.set(args.agent)
+    }
+  })
+
+  let appliedModel = false
+  createEffect(() => {
+    if (appliedModel || !args.model) return
+    const { providerID, modelID } = Model.parse(args.model)
+    if (!providerID || !modelID) return
+    const models = data.location.model.list(location.ref)
+    if (!models?.length) return
+    if (models.some((item) => item.providerID === providerID && item.id === modelID)) {
+      appliedModel = true
+      local.model.set({ providerID, modelID }, { recent: true })
+    }
   })
 
   let continued = false

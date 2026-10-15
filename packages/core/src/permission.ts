@@ -100,8 +100,16 @@ export function merge(...rulesets: Permission.Ruleset[]): Permission.Ruleset {
   return rulesets.flat()
 }
 
+export type Validator = (
+  input: AssertInput,
+) => Effect.Effect<
+  { readonly verdict: "allow" | "deny" | "uncertain" | "fallback"; readonly reason?: string } | undefined,
+  CorrectedError
+>
+
 export interface Interface {
   readonly close: Effect.Effect<void>
+  readonly registerValidator?: (validator: Validator) => Effect.Effect<void>
   readonly ask: (input: AssertInput) => Effect.Effect<AskResult, SessionErrors.NotFoundError>
   readonly assert: (input: AssertInput) => Effect.Effect<void, Error | SessionErrors.NotFoundError>
   readonly reply: (input: ReplyInput) => Effect.Effect<void, NotFoundError>
@@ -129,6 +137,12 @@ const layer = Layer.effect(
     const hooks = yield* PluginHooks.Service
     const pending = new Map<ID, Pending>()
     let closed = false
+    let validator: Validator | undefined
+
+    const registerValidator = (fn: Validator) =>
+      Effect.sync(() => {
+        validator = fn
+      })
 
     const close = Effect.gen(function* () {
       closed = true
@@ -243,6 +257,17 @@ const layer = Layer.effect(
               })
             }
             if (result.effect === "allow") return
+
+            if (validator) {
+              const outcome = yield* validator(input).pipe(
+                Effect.catch((error) => {
+                  if (error instanceof CorrectedError) return Effect.fail(error)
+                  return Effect.succeed(undefined)
+                }),
+              )
+              if (outcome?.verdict === "allow") return
+            }
+
             const item = yield* create(request(input, result.message), input.agent)
             return yield* restore(Deferred.await(item.deferred)).pipe(
               // Deliberate defect tunnel: leaves wrap execution in blanket `mapError`, which
@@ -336,7 +361,7 @@ const layer = Layer.effect(
       return Array.from(pending.values(), (item) => item.request).filter((request) => request.sessionID === sessionID)
     })
 
-    return Service.of({ ask, assert, reply, get, forSession, list, close })
+    return Service.of({ ask, assert, reply, get, forSession, list, close, registerValidator })
   }),
 )
 

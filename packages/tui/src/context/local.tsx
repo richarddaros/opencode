@@ -94,7 +94,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
                 (draft ? undefined : args.agent) ??
                 data.session.get(route.data.sessionID)?.agent ??
                 agentStore.current)
-              : agentStore.current
+              : (args.agent ?? agentStore.current)
           return agents().find((agent) => agent.id === selected) ?? agents().at(0)
         },
         set(id: string) {
